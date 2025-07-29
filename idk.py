@@ -3,54 +3,121 @@ import threading
 import time
 import numpy as np
 import mss
-import torch
-import cv2
+import ctypes
 from ultralytics import YOLO
-import pyautogui
+import keyboard  # pip install keyboard
 
 # --- CONFIG ---
-MODEL_PATH = r"C:\Users\User\ultralytics\runs\detect\train11\weights\best.pt"
+MODEL_PATH = r"C:\Users\User\Downloads\nothingtoseehere\best.pt"
 FOV_RADIUS = 150
 TARGET_FPS = 144
-MOUSE_SPEED = 1000 # pixels/sec
 
-# --- INIT ---
+MOUSE_SPEED = 500
+aim_assist_enabled = True
+
 model = YOLO(MODEL_PATH)
 screen_w, screen_h = 1920, 1080
 center_x, center_y = screen_w // 2, screen_h // 2
-pyautogui.FAILSAFE = False
 
-# TK Overlay
+# --- CTYPES MOUSE ---
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+class INPUT(ctypes.Structure):
+    class _INPUT(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT)]
+    _anonymous_ = ("ii",)
+    _fields_ = [("type", ctypes.c_ulong), ("ii", _INPUT)]
+
+def move_mouse_absolute(x, y):
+    abs_x = int(x * 65535 / screen_w)
+    abs_y = int(y * 65535 / screen_h)
+    extra = ctypes.c_ulong(0)
+    mi = MOUSEINPUT(dx=abs_x,
+                    dy=abs_y,
+                    mouseData=0,
+                    dwFlags=0x8000 | 0x0001,  # MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE
+                    time=0,
+                    dwExtraInfo=ctypes.pointer(extra))
+    inp = INPUT(type=0, mi=mi) 
+    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+def get_mouse_pos():
+    pt = ctypes.wintypes.POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
 root = tk.Tk()
+root.title("Aim Assist Overlay & Config")
 root.attributes("-topmost", True)
 root.attributes("-transparentcolor", "black")
 root.overrideredirect(True)
 root.geometry(f"{screen_w}x{screen_h}+0+0")
+
 canvas = tk.Canvas(root, width=screen_w, height=screen_h, bg="black", highlightthickness=0)
 canvas.pack()
 
-# Draw FOV circle
 fov_circle = canvas.create_oval(
     center_x - FOV_RADIUS, center_y - FOV_RADIUS,
     center_x + FOV_RADIUS, center_y + FOV_RADIUS,
     outline="green", width=2, tags="fov"
 )
 
-# FPS label
 fps_label = canvas.create_text(100, 30, fill="white", font=("Consolas", 16), text="FPS: 0", tags="fps")
 
+# --- Control Panel Frame (slider + toggle) ---
+control_frame = tk.Frame(root, bg="black")
+control_frame.place(x=10, y=10)
+
+MOUSE_SPEED_var = tk.DoubleVar(value=MOUSE_SPEED)
+aim_assist_enabled_var = tk.BooleanVar(value=aim_assist_enabled)
+
+def on_slider_change(value):
+    global MOUSE_SPEED
+    MOUSE_SPEED = float(value)
+
+slider = tk.Scale(control_frame, from_=0, to=1000, orient=tk.HORIZONTAL, length=300,
+                  command=on_slider_change, bg="black", fg="white",
+                  troughcolor="gray", highlightthickness=0, variable=MOUSE_SPEED_var)
+slider.pack()
+
+def toggle_aim_assist():
+    global aim_assist_enabled
+    aim_assist_enabled = not aim_assist_enabled
+    aim_assist_enabled_var.set(aim_assist_enabled)
+    toggle_button.config(text="Aim Assist: ON" if aim_assist_enabled else "Aim Assist: OFF",
+                         bg="darkgreen" if aim_assist_enabled else "darkred")
+
+toggle_button = tk.Button(control_frame, text="Aim Assist: ON", command=toggle_aim_assist, bg="darkgreen", fg="white", font=("Consolas", 12))
+toggle_button.pack(pady=5)
+
+# Control panel visibility toggle state
+control_panel_visible = True
+
+def toggle_control_panel():
+    global control_panel_visible
+    if control_panel_visible:
+        control_frame.place_forget()
+        control_panel_visible = False
+    else:
+        control_frame.place(x=10, y=10)
+        control_panel_visible = True
+
+# --- AI LOOP ---
 def ai_loop():
     sct = mss.mss()
-    monitor = sct.monitors[1]  # Laptop display
+    monitor = sct.monitors[1]
 
     while True:
         start_time = time.time()
         img = np.array(sct.grab(monitor))[:, :, :3]
 
-        # YOLO detection
-        results = model.predict(source=img, device=0, verbose=False)[0]
-
-        # Remove previous boxes
+        results = model.predict(source=img, imgsz=814, device='cpu', verbose=False)[0]
         canvas.delete("box")
 
         best_target = None
@@ -59,25 +126,21 @@ def ai_loop():
         for box in results.boxes:
             x0, y0, x1b, y1b = box.xyxy[0].cpu().numpy()
             conf = float(box.conf[0])
-            label = f"{conf:.2f}"
 
             cx = (x0 + x1b) / 2
             cy = (y0 + y1b) / 2
 
-            # Get closest target to center (no FOV limit)
             dist = np.hypot(cx - center_x, cy - center_y)
             if dist < best_distance:
                 best_distance = dist
                 best_target = (cx, cy)
 
-            # Draw box
             canvas.create_rectangle(x0, y0, x1b, y1b, outline="red", width=2, tags="box")
-            canvas.create_text(x0 + 5, y0 + 5, anchor="nw", text=label, fill="white", font=("Consolas", 10), tags="box")
+            canvas.create_text(x0 + 5, y0 + 5, anchor="nw", text=f"{conf:.2f}", fill="white", font=("Consolas", 10), tags="box")
 
-        # Move mouse to target
-        if best_target:
+        if best_target and aim_assist_enabled:
             tx, ty = best_target
-            current_x, current_y = pyautogui.position()
+            current_x, current_y = get_mouse_pos()
 
             dx = tx - current_x
             dy = ty - current_y
@@ -87,16 +150,15 @@ def ai_loop():
                 step = MOUSE_SPEED / TARGET_FPS
                 move_x = current_x + np.clip(dx, -step, step)
                 move_y = current_y + np.clip(dy, -step, step)
-                pyautogui.moveTo(move_x, move_y)
+                move_mouse_absolute(move_x, move_y)
 
-        # Update FPS
         elapsed = time.time() - start_time
         fps = int(1 / elapsed) if elapsed > 0 else 0
         canvas.itemconfig(fps_label, text=f"FPS: {fps}")
 
-        # Wait for next frame
         time.sleep(max(0.001, 1 / TARGET_FPS - elapsed))
 
-# Start AI thread
 threading.Thread(target=ai_loop, daemon=True).start()
+keyboard.add_hotkey('insert', toggle_control_panel)
+
 root.mainloop()
