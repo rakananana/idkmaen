@@ -27,43 +27,27 @@ TARGET_FPS = 144
 
 MOUSE_SPEED = 500
 aim_assist_enabled = True
+boxes_visible = True  # Controls ESP boxes visibility
 
-model = YOLO(MODEL_PATH)
 screen_w, screen_h = 1920, 1080
 center_x, center_y = screen_w // 2, screen_h // 2
 
+# Define no-aim zone rectangle (adjust to your character's position)
+# Format: (x0, y0, x1, y1)
+no_aim_zone = (800, 900, 1100, 1100)  # <-- tweak these coordinates as needed
+
 # --- CTYPES MOUSE ---
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", ctypes.c_long),
-                ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong),
-                ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-class INPUT(ctypes.Structure):
-    class _INPUT(ctypes.Union):
-        _fields_ = [("mi", MOUSEINPUT)]
-    _anonymous_ = ("ii",)
-    _fields_ = [("type", ctypes.c_ulong), ("ii", _INPUT)]
-
-def move_mouse_absolute(x, y):
-    abs_x = int(x * 65535 / screen_w)
-    abs_y = int(y * 65535 / screen_h)
-    extra = ctypes.c_ulong(0)
-    mi = MOUSEINPUT(dx=abs_x,
-                    dy=abs_y,
-                    mouseData=0,
-                    dwFlags=0x8000 | 0x0001,  # MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE
-                    time=0,
-                    dwExtraInfo=ctypes.pointer(extra))
-    inp = INPUT(type=0, mi=mi)  # INPUT_MOUSE = 0
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+def move_mouse_relative(dx, dy):
+    # 0x0001 = MOUSEEVENTF_MOVE
+    ctypes.windll.user32.mouse_event(0x0001, int(dx), int(dy), 0, 5)
 
 def get_mouse_pos():
     pt = ctypes.wintypes.POINT()
     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return pt.x, pt.y
+
+def rects_overlap(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1):
+    return not (ax1 < bx0 or ax0 > bx1 or ay1 < by0 or ay0 > by1)
 
 # --- TK Overlay ---
 root = tk.Tk()
@@ -85,12 +69,13 @@ fov_circle = canvas.create_oval(
 
 fps_label = canvas.create_text(100, 30, fill="white", font=("Consolas", 16), text="FPS: 0", tags="fps")
 
-# --- Control Panel Frame (slider + toggle) ---
+# --- Control Panel Frame (slider + toggles) ---
 control_frame = tk.Frame(root, bg="black")
 control_frame.place(x=10, y=10)
 
 MOUSE_SPEED_var = tk.DoubleVar(value=MOUSE_SPEED)
 aim_assist_enabled_var = tk.BooleanVar(value=aim_assist_enabled)
+boxes_visible_var = tk.BooleanVar(value=boxes_visible)
 
 def on_slider_change(value):
     global MOUSE_SPEED
@@ -110,6 +95,16 @@ def toggle_aim_assist():
 
 toggle_button = tk.Button(control_frame, text="Aim Assist: ON", command=toggle_aim_assist, bg="darkgreen", fg="white", font=("Consolas", 12))
 toggle_button.pack(pady=5)
+
+def toggle_boxes():
+    global boxes_visible
+    boxes_visible = not boxes_visible
+    boxes_visible_var.set(boxes_visible)
+    boxes_toggle_btn.config(text="Boxes: ON" if boxes_visible else "Boxes: OFF",
+                           bg="darkgreen" if boxes_visible else "darkred")
+
+boxes_toggle_btn = tk.Button(control_frame, text="Boxes: ON", command=toggle_boxes, bg="darkgreen", fg="white", font=("Consolas", 12))
+boxes_toggle_btn.pack(pady=5)
 
 # Control panel visibility toggle state
 control_panel_visible = True
@@ -132,7 +127,7 @@ def ai_loop():
         start_time = time.time()
         img = np.array(sct.grab(monitor))[:, :, :3]
 
-        results = model.predict(source=img, imgsz=714, device='cpu', verbose=False)[0]
+        results = model.predict(source=img, imgsz=736, device='cpu', verbose=False)[0]
         canvas.delete("box")
 
         best_target = None
@@ -142,6 +137,10 @@ def ai_loop():
             x0, y0, x1b, y1b = box.xyxy[0].cpu().numpy()
             conf = float(box.conf[0])
 
+            # Skip detections overlapping no-aim zone (your character)
+            if rects_overlap(x0, y0, x1b, y1b, *no_aim_zone):
+                continue
+
             cx = (x0 + x1b) / 2
             cy = (y0 + y1b) / 2
 
@@ -150,8 +149,9 @@ def ai_loop():
                 best_distance = dist
                 best_target = (cx, cy)
 
-            canvas.create_rectangle(x0, y0, x1b, y1b, outline="red", width=2, tags="box")
-            canvas.create_text(x0 + 5, y0 + 5, anchor="nw", text=f"{conf:.2f}", fill="white", font=("Consolas", 10), tags="box")
+            if boxes_visible:
+                canvas.create_rectangle(x0, y0, x1b, y1b, outline="red", width=2, tags="box")
+                canvas.create_text(x0 + 5, y0 + 5, anchor="nw", text=f"{conf:.2f}", fill="white", font=("Consolas", 10), tags="box")
 
         if best_target and aim_assist_enabled:
             tx, ty = best_target
@@ -163,9 +163,7 @@ def ai_loop():
 
             if distance > 2:  # Deadzone
                 step = MOUSE_SPEED / TARGET_FPS
-                move_x = current_x + np.clip(dx, -step, step)
-                move_y = current_y + np.clip(dy, -step, step)
-                move_mouse_absolute(move_x, move_y)
+                move_mouse_relative(np.clip(dx, -step, step), np.clip(dy, -step, step))
 
         elapsed = time.time() - start_time
         fps = int(1 / elapsed) if elapsed > 0 else 0
