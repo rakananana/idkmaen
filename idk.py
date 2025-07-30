@@ -5,10 +5,23 @@ import numpy as np
 import mss
 import ctypes
 from ultralytics import YOLO
-import keyboard  # pip install keyboard
+import keyboard
+import os
+import sys
 
 # --- CONFIG ---
-MODEL_PATH = r"C:\Users\User\Downloads\nothingtoseehere\best.pt"
+model_dir = os.path.join(os.path.expanduser("~"), "Downloads", "ai aimbot")
+model_path = os.path.join(model_dir, "best.pt")
+
+if not os.path.isfile(model_path):
+    print("didnt find best.pt")
+    sys.exit(1)
+else:
+    print("found!")
+
+MODEL_PATH = model_path
+
+model = YOLO(MODEL_PATH)
 FOV_RADIUS = 150
 TARGET_FPS = 144
 
@@ -44,7 +57,7 @@ def move_mouse_absolute(x, y):
                     dwFlags=0x8000 | 0x0001,  # MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE
                     time=0,
                     dwExtraInfo=ctypes.pointer(extra))
-    inp = INPUT(type=0, mi=mi) 
+    inp = INPUT(type=0, mi=mi)  # INPUT_MOUSE = 0
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 def get_mouse_pos():
@@ -52,6 +65,7 @@ def get_mouse_pos():
     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return pt.x, pt.y
 
+# --- TK Overlay ---
 root = tk.Tk()
 root.title("Aim Assist Overlay & Config")
 root.attributes("-topmost", True)
@@ -62,6 +76,7 @@ root.geometry(f"{screen_w}x{screen_h}+0+0")
 canvas = tk.Canvas(root, width=screen_w, height=screen_h, bg="black", highlightthickness=0)
 canvas.pack()
 
+# FOV circle - always visible
 fov_circle = canvas.create_oval(
     center_x - FOV_RADIUS, center_y - FOV_RADIUS,
     center_x + FOV_RADIUS, center_y + FOV_RADIUS,
@@ -117,7 +132,7 @@ def ai_loop():
         start_time = time.time()
         img = np.array(sct.grab(monitor))[:, :, :3]
 
-        results = model.predict(source=img, imgsz=814, device='cpu', verbose=False)[0]
+        results = model.predict(source=img, imgsz=714, device='cpu', verbose=False)[0]
         canvas.delete("box")
 
         best_target = None
